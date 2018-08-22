@@ -9,9 +9,19 @@
 
 typedef struct FileBufferObject
 {
-    size_t size;
-    void *buffer;
+	size_t size;
+	unsigned char *buffer;
 } FileBuffer;
+
+typedef struct YuvNv12FormatObject
+{
+	int dimen_x;
+	int dimen_y;
+	unsigned char *y;
+	unsigned char *u;
+	unsigned char *v;
+} YuvNv12Format;
+
 
 void converter(char *, char *);
 void print_help(); /* print messages */
@@ -49,7 +59,8 @@ FileBuffer *read_raw(char *raw_path)
 
 	if (DBG) printf("RAW file size is %ld\n", raw_file_size);
 
-	fb->buffer = malloc(raw_file_size);
+	/* allocate memory space for raw */
+	fb->buffer = (unsigned char *)malloc(raw_file_size);
 	fb->size = raw_file_size;
 
 	if (fb->buffer) {
@@ -60,13 +71,47 @@ FileBuffer *read_raw(char *raw_path)
 	return fb;
 }
 
+YuvNv12Format *parse_raw(FileBuffer *raw_buffer)
+{
+	int number_of_pixels, uv_index;
+	unsigned char *uv_plane;
+	/* NOTE: ignore image size detection, assume image size is 640x480 */
+	YuvNv12Format *yuv_obj = (YuvNv12Format *) malloc(sizeof(YuvNv12Format));
+	if (yuv_obj == NULL) {
+		/* TODO: error handling here */
+		return yuv_obj;
+	}
+	yuv_obj->dimen_x = 640;
+	yuv_obj->dimen_y = 480;
+	number_of_pixels = yuv_obj->dimen_x * yuv_obj->dimen_y;
+
+	/* Y plane has one byte per pixel */
+	yuv_obj->y = (unsigned char *) malloc(sizeof(char)*number_of_pixels);
+	/* 2x2 pixels share one CbCr byte */
+	yuv_obj->u = (unsigned char *) malloc(sizeof(char)*number_of_pixels/4);
+	yuv_obj->v = (unsigned char *) malloc(sizeof(char)*number_of_pixels/4);
+
+	memcpy(yuv_obj->y, raw_buffer->buffer, number_of_pixels);
+
+	uv_plane = raw_buffer->buffer + number_of_pixels;
+	for (uv_index = 0; uv_index < number_of_pixels/4; uv_index++) {
+		yuv_obj->u[uv_index] = uv_plane[uv_index] & 0xf;
+		yuv_obj->v[uv_index] = uv_plane[uv_index] >> 4;
+	}
+
+	/* TODO: free raw_buffer here */
+	free(yuv_obj);
+
+	return yuv_obj;
+}
+
 FileBuffer *transform_raw_to_png(FileBuffer *raw_buf_ptr)
 {
 	/* TODO: transform raw to png */
 	FileBuffer *png_buf_ptr = (FileBuffer *) malloc(sizeof(FileBuffer));
 	if(raw_buf_ptr && png_buf_ptr) {
 		png_buf_ptr->size = raw_buf_ptr->size;
-		png_buf_ptr->buffer = malloc(png_buf_ptr->size);
+		png_buf_ptr->buffer = (unsigned char *)malloc(png_buf_ptr->size);
 		if(png_buf_ptr->buffer) {
 			memcpy(png_buf_ptr->buffer, raw_buf_ptr->buffer, png_buf_ptr->size);
 		}
@@ -93,9 +138,12 @@ void write_png(char *png_path, FileBuffer *png_buf_ptr)
 void converter(char *in_raw_path, char *out_png_path)
 {
 	FileBuffer *raw_buf_ptr, *png_buf_ptr;
+	YuvNv12Format *yuv_obj;
 
 	/* load raw into memory */
 	raw_buf_ptr = read_raw(in_raw_path);
+
+	yuv_obj = parse_raw(raw_buf_ptr);
 
 	png_buf_ptr = transform_raw_to_png(raw_buf_ptr);
 
