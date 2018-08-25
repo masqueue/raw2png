@@ -26,6 +26,13 @@ typedef struct YuvNv12FormatObject
 	unsigned char *v;
 } YuvNv12Format;
 
+typedef struct RgbFormatObject
+{
+	int dimen_x;
+	int dimen_y;
+	int num_of_pixels;
+	unsigned char *buffer;
+} RgbFormat;
 
 void converter(char *, char *);
 void print_help(); /* print messages */
@@ -96,15 +103,14 @@ YuvNv12Format *parse_raw(FileBuffer *raw_buffer)
 	memcpy(yuv_obj->y, raw_buffer->buffer, yuv_obj->num_of_pixels);
 
 	/* 2x2 pixels share one CbCr byte */
-	/*yuv_obj->u = (unsigned char *) malloc(yuv_obj->num_of_pixels/4);
+	yuv_obj->u = (unsigned char *) malloc(yuv_obj->num_of_pixels/4);
 	yuv_obj->v = (unsigned char *) malloc(yuv_obj->num_of_pixels/4);
-
 
 	uv_plane = raw_buffer->buffer + yuv_obj->num_of_pixels;
 	for (uv_index = 0; uv_index < yuv_obj->num_of_pixels/4; uv_index++) {
 		yuv_obj->u[uv_index] = uv_plane[uv_index] & 0xf;
 		yuv_obj->v[uv_index] = uv_plane[uv_index] >> 4;
-	}*/
+	}
 
 	/* free raw_buffer here */
 	free(raw_buffer->buffer);
@@ -113,7 +119,56 @@ YuvNv12Format *parse_raw(FileBuffer *raw_buffer)
 	return yuv_obj;
 }
 
-FileBuffer *transform_raw_to_png(YuvNv12Format *yuv_buffer)
+/* transform yuv format into rbg 24bit format */
+RgbFormat *transform_yuv_to_rgb(YuvNv12Format *yuv_obj)
+{
+	int x, y, uv_plane_x, uv_plane_y, u_prime, v_prime, yuv_y;
+	unsigned char *write_ptr;
+	RgbFormat *rgb_obj = (RgbFormat *) malloc(sizeof(RgbFormat));
+	rgb_obj->num_of_pixels = yuv_obj->num_of_pixels;
+	rgb_obj->dimen_x = yuv_obj->dimen_x;
+	rgb_obj->dimen_y = yuv_obj->dimen_y;
+	rgb_obj->buffer = (unsigned char *) malloc(yuv_obj->num_of_pixels*3);
+	write_ptr = rgb_obj->buffer;
+
+	/* calculate RGB value for each pixel and write to rgb_obj->buffer */
+	/* R = Y + 1.402 * (V - 128) */
+	/* G = Y - 0.344 * (U - 128) - 0.714 * (V - 128) */
+	/* B = Y + 1.722 * (U - 128) */
+	/* formula is found on StackOverflow */
+	u_prime = (int)(yuv_obj->u[0]) - 128;
+	v_prime = (int)(yuv_obj->v[0]) - 128;
+	for (y = 0, uv_plane_y = 0; y < yuv_obj->dimen_y; y++) {
+		for (x = 0, uv_plane_y = 0; x < yuv_obj->dimen_x; x++) {
+			yuv_y = yuv_obj->y[y * yuv_obj->dimen_x + x];
+			*write_ptr = yuv_y + 1.402 * v_prime;
+			*(write_ptr + 1) = yuv_y - 0.344 * u_prime - 0.714 * v_prime;
+			*(write_ptr + 2) = y + 1.722 * u_prime;
+			//if (DBG) printf("(%d, %d) R: %u, G: %u, B: %u\n", x, y, *write_ptr, *(write_ptr + 1), *(write_ptr + 2));
+			write_ptr += 3;
+			if (x % 2) {
+				/* every move on uv plane updates u_prime and v_prime */
+				uv_plane_x++;
+				u_prime = (int)(yuv_obj->u[((yuv_obj->dimen_x)/2) * uv_plane_y + uv_plane_x]) - 128;
+				v_prime = (int)(yuv_obj->v[((yuv_obj->dimen_x)/2) * uv_plane_y + uv_plane_x]) - 128;
+			}
+		}
+		if (y % 2) {
+			/* every move on uv plane updates u_prime and v_prime */
+			uv_plane_y++;
+			u_prime = (int)(yuv_obj->u[((yuv_obj->dimen_x)/2) * uv_plane_y + uv_plane_x]) - 128;
+			v_prime = (int)(yuv_obj->v[((yuv_obj->dimen_x)/2) * uv_plane_y + uv_plane_x]) - 128;
+		}
+	}
+	free(yuv_obj->y);
+	free(yuv_obj->u);
+	free(yuv_obj->v);
+	free(yuv_obj);
+
+	return rgb_obj;
+}
+
+FileBuffer *write_rbg_to_png(RgbFormat *rgb_buffer)
 {
 	/* TODO: generate png */
 	FileBuffer *png_buf_ptr;
@@ -128,7 +183,7 @@ FileBuffer *transform_raw_to_png(YuvNv12Format *yuv_buffer)
 			0x00, 0x00, 0x02, 0x80, /* width 640 */
 			0x00, 0x00, 0x01, 0xE0, /* height 480 */
 			0x08, /* bit depth */
-			0x00, /* color type grayscale */
+			0x02, /* color type rgb triple */
 			0x00, /* compressed method */
 			0x00, /* filter method */
 			0x00 /* interface method */
@@ -143,19 +198,21 @@ FileBuffer *transform_raw_to_png(YuvNv12Format *yuv_buffer)
 			0xAE, 0x42, 0x60, 0x82  /* CRC (hardcoded) */ };
 
 	png_buf_ptr = (FileBuffer *) malloc(sizeof(FileBuffer));
-	if(yuv_buffer && png_buf_ptr) {
+	if(rgb_buffer && png_buf_ptr) {
 		/* TODO: calculate how much memory space is required here */
 		png_buf_ptr->size = sizeof(png_signature)
 				+ sizeof(png_ihdr_chunk)
 				+ 4 /* ihdr crc */
 				+ (4 /* idat chunk length info */
 				+ sizeof(png_idat_chunk_type)
-				+ yuv_buffer->dimen_x
-				+ 4) * yuv_buffer->dimen_y /* idat crc */
+				+ (rgb_buffer->dimen_x * 3)
+				+ 4) * rgb_buffer->dimen_y /* idat crc */
 				+ sizeof(png_iend_chunk);
+		if (DBG) printf("allocating %ld bytes for png_buf_ptr\n", png_buf_ptr->size);
 		png_buf_ptr->buffer = (unsigned char *)malloc(png_buf_ptr->size);
 		png_write_buf_ptr = png_buf_ptr->buffer;
 		if(png_write_buf_ptr) {
+			if (DBG) printf("allocated %ld bytes for png_buf_ptr\n", png_buf_ptr->size);
 			/* write png signature */
 			memcpy(png_write_buf_ptr, png_signature, sizeof(png_signature));
 			png_write_buf_ptr += sizeof(png_signature);
@@ -170,10 +227,10 @@ FileBuffer *transform_raw_to_png(YuvNv12Format *yuv_buffer)
 			png_write_buf_ptr += 4;
 
 
-			printf("number of idat pixels %d\n", yuv_buffer->num_of_pixels);
+			printf("number of idat pixels %d\n", rgb_buffer->num_of_pixels);
 			/* write idat length info */
-			idat_len_r = __bswap_32(yuv_buffer->dimen_x);
-			for (idat_cnt = 0; idat_cnt < yuv_buffer->dimen_y; idat_cnt++) {
+			idat_len_r = __bswap_32(rgb_buffer->dimen_x * 3);
+			for (idat_cnt = 0; idat_cnt < rgb_buffer->dimen_y; idat_cnt++) {
 				memcpy(png_write_buf_ptr, &idat_len_r, 4);
 				png_write_buf_ptr += 4;
 				/* write idat chunk type */
@@ -181,10 +238,10 @@ FileBuffer *transform_raw_to_png(YuvNv12Format *yuv_buffer)
 				idat_crc_ptr = png_write_buf_ptr; /* remember idat crc start point */
 				png_write_buf_ptr += sizeof(png_idat_chunk_type);
 				/* write idat chunk data; use only y for grayscale png */
-				memcpy(png_write_buf_ptr, yuv_buffer->y + (yuv_buffer->dimen_x*idat_cnt), yuv_buffer->dimen_x);
-				png_write_buf_ptr += yuv_buffer->dimen_x;
+				memcpy(png_write_buf_ptr, rgb_buffer->buffer + (rgb_buffer->dimen_x * 3 * idat_cnt), rgb_buffer->dimen_x * 3);
+				png_write_buf_ptr += (rgb_buffer->dimen_x * 3);
 				/* write idat crc */
-				crc_tmp = crc(idat_crc_ptr, sizeof(png_idat_chunk_type) + yuv_buffer->dimen_x);
+				crc_tmp = crc(idat_crc_ptr, sizeof(png_idat_chunk_type) + rgb_buffer->dimen_x * 3);
 				crc_tmp = __bswap_32(crc_tmp);
 				memcpy(png_write_buf_ptr, &crc_tmp, 4);
 				png_write_buf_ptr += 4;
@@ -193,18 +250,16 @@ FileBuffer *transform_raw_to_png(YuvNv12Format *yuv_buffer)
 			/* write iend chunk */
 			memcpy(png_write_buf_ptr, png_iend_chunk, sizeof(png_iend_chunk));
 		}
-		free(yuv_buffer->y);
-		/*free(yuv_buffer->u);
-		free(yuv_buffer->v);*/
-		free(yuv_buffer);
+		free(rgb_buffer->buffer);
+		free(rgb_buffer);
 	}
 	return png_buf_ptr;
 }
 
-void write_png(char *png_path, FileBuffer *png_buf_ptr)
+void write_png_to_disk(char *png_path, FileBuffer *png_buf_ptr)
 {
 	FILE *output_fd;
-	if (png_buf_ptr && png_buf_ptr->buffer) {
+	if (png_buf_ptr != NULL  && png_buf_ptr->buffer != NULL) {
 		output_fd = fopen(png_path, "wb");
 		if(output_fd) {
 			fwrite(png_buf_ptr->buffer, 1, png_buf_ptr->size, output_fd);
@@ -219,15 +274,18 @@ void converter(char *in_raw_path, char *out_png_path)
 {
 	FileBuffer *raw_buf_ptr, *png_buf_ptr;
 	YuvNv12Format *yuv_obj;
+	RgbFormat *rgb_obj;
 
 	/* load raw into memory */
 	raw_buf_ptr = read_raw(in_raw_path);
 
 	yuv_obj = parse_raw(raw_buf_ptr);
 
-	png_buf_ptr = transform_raw_to_png(yuv_obj);
+	rgb_obj = transform_yuv_to_rgb(yuv_obj);
 
-	write_png(out_png_path, png_buf_ptr);
+	png_buf_ptr = write_rbg_to_png(rgb_obj);
+
+	write_png_to_disk(out_png_path, png_buf_ptr);
 }
 
 void print_help()
