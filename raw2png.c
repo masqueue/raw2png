@@ -342,7 +342,7 @@ void build_png_data(PngObject *png, RgbBuffer *rgb_buffer)
 	unsigned char *compressed_buffer = (unsigned char *) malloc(compress_buf_len);
 
 	c_result = compress2(compressed_buffer, &compress_buf_len, rgb_buffer->buffer, rgb_buf_len, 0);
-	if (DBG) printf("actual compress buffer length: %lu\n", compress_buf_len);
+	//if (DBG) printf("actual compress buffer length: %lu\n", compress_buf_len);
 	free(rgb_buffer->buffer);
 	free(rgb_buffer);
 
