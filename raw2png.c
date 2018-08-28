@@ -35,6 +35,7 @@ typedef struct RgbBufferObject
 	int num_of_pixels;
 	unsigned char *buffer;
 	long size;
+	int is_grayscale;
 } RgbBuffer;
 
 typedef struct ChunkObject
@@ -146,8 +147,14 @@ RgbBuffer *transform_yuv_to_rgb(Yuv420pBuffer *yuv_obj)
 	rgb_obj->num_of_pixels = yuv_obj->num_of_pixels;
 	rgb_obj->dimen_x = yuv_obj->dimen_x;
 	rgb_obj->dimen_y = yuv_obj->dimen_y;
+	/* TODO: hardcoded grayscale config */
+	rgb_obj->is_grayscale = 1;
 	/* every line contains a filter type byte */
-	rgb_obj->size = yuv_obj->num_of_pixels * 3 + yuv_obj->dimen_y;
+	if (rgb_obj->is_grayscale) {
+		rgb_obj->size = yuv_obj->num_of_pixels + yuv_obj->dimen_y;
+	} else {
+		rgb_obj->size = yuv_obj->num_of_pixels * 3 + yuv_obj->dimen_y;
+	}
 	rgb_obj->buffer = (unsigned char *) malloc(rgb_obj->size);
 	write_ptr = rgb_obj->buffer;
 
@@ -160,26 +167,33 @@ RgbBuffer *transform_yuv_to_rgb(Yuv420pBuffer *yuv_obj)
 	v_prime = (int)(yuv_obj->v[0]) - 128;
 	for (y = 0, uv_plane_y = 0; y < yuv_obj->dimen_y; y++) {
 		*write_ptr = 0; // filter type byte for each line
-		write_ptr += 1;
+		write_ptr++;
 		for (x = 0, uv_plane_y = 0; x < yuv_obj->dimen_x; x++) {
 			yuv_y = yuv_obj->y[y * yuv_obj->dimen_x + x];
-			*(write_ptr + 0) = yuv_y + 1.402 * v_prime;
-			*(write_ptr + 1) = yuv_y - 0.344 * u_prime - 0.714 * v_prime;
-			*(write_ptr + 2) = y + 1.722 * u_prime;
-			//if (DBG) printf("(%d, %d) R: %u, G: %u, B: %u\n", x, y, *write_ptr, *(write_ptr + 1), *(write_ptr + 2));
-			write_ptr += 3;
-			if (x % 2) {
+			if (rgb_obj->is_grayscale) {
+				memcpy(write_ptr, &yuv_y, 1);
+				write_ptr++;
+			} else {
+				*(write_ptr + 0) = yuv_y + 1.402 * v_prime;
+				*(write_ptr + 1) = yuv_y - 0.344 * u_prime - 0.714 * v_prime;
+				*(write_ptr + 2) = y + 1.722 * u_prime;
+				//if (DBG) printf("(%d, %d) R: %u, G: %u, B: %u\n", x, y, *write_ptr, *(write_ptr + 1), *(write_ptr + 2));
+				write_ptr += 3;
+				if (x % 2) {
+					/* every move on uv plane updates u_prime and v_prime */
+					uv_plane_x++;
+					u_prime = (int)(yuv_obj->u[((yuv_obj->dimen_x)/2) * uv_plane_y + uv_plane_x]) - 128;
+					v_prime = (int)(yuv_obj->v[((yuv_obj->dimen_x)/2) * uv_plane_y + uv_plane_x]) - 128;
+				}
+			}
+		}
+		if (rgb_obj->is_grayscale != 1) {
+			if (y % 2) {
 				/* every move on uv plane updates u_prime and v_prime */
-				uv_plane_x++;
+				uv_plane_y++;
 				u_prime = (int)(yuv_obj->u[((yuv_obj->dimen_x)/2) * uv_plane_y + uv_plane_x]) - 128;
 				v_prime = (int)(yuv_obj->v[((yuv_obj->dimen_x)/2) * uv_plane_y + uv_plane_x]) - 128;
 			}
-		}
-		if (y % 2) {
-			/* every move on uv plane updates u_prime and v_prime */
-			uv_plane_y++;
-			u_prime = (int)(yuv_obj->u[((yuv_obj->dimen_x)/2) * uv_plane_y + uv_plane_x]) - 128;
-			v_prime = (int)(yuv_obj->v[((yuv_obj->dimen_x)/2) * uv_plane_y + uv_plane_x]) - 128;
 		}
 	}
 	free(yuv_obj->y);
@@ -224,21 +238,13 @@ void build_png_header(PngObject *png, RgbBuffer *rgb_buffer)
 			0x00, 0x00, 0x00, 0x00, /* width 640 */
 			0x00, 0x00, 0x00, 0x00, /* height 480 */
 			0x08, /* bit depth */
-			0x02, /* color type rgb triple */
-			0x00, /* compressed method */
-			0x00, /* filter method */
-			0x00 /* interface method */ };
-	unsigned char ihdr_chunk_crc_test[] = {
-			0x49, 0x48, 0x44, 0x52, /* chunk type IHDR */
-			0x00, 0x00, 0x02, 0x80, /* width 640 */
-			0x00, 0x00, 0x01, 0xE0, /* height 480 */
-			0x08, /* bit depth */
-			0x02, /* color type rgb triple */
+			0x00, /* color type */
 			0x00, /* compressed method */
 			0x00, /* filter method */
 			0x00 /* interface method */ };
 	long chunk_crc;
 	unsigned int reversed_bytes;
+	unsigned char color_type;
 
 	/* ihdr is the first chunk */
 	Chunk *ihdr = (Chunk *) malloc(sizeof(Chunk));
@@ -253,6 +259,8 @@ void build_png_header(PngObject *png, RgbBuffer *rgb_buffer)
 	memcpy(ihdr_chunk_data , &reversed_bytes, 4);
 	reversed_bytes = __bswap_32(rgb_buffer->dimen_y);
 	memcpy(ihdr_chunk_data + 4, &reversed_bytes, 4);
+	color_type = rgb_buffer->is_grayscale?0x00:0x02;
+	memcpy(ihdr_chunk_data + 9, &color_type, 1);
 	memcpy(ihdr->data, ihdr_chunk_data, sizeof(ihdr_chunk_data));
 
 	chunk_crc = calc_chunk_crc(ihdr_chunk_type, ihdr_chunk_data, sizeof(ihdr_chunk_data));
