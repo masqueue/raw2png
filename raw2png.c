@@ -5,9 +5,6 @@
 #include <byteswap.h>
 #include <zlib.h>
 
-#define MAX_PATH_LEN 256
-#define CHUNK_SIZE_WO_DATA sizeof(Chunk) - 2 * sizeof(void *)
-
 #define DBG 1
 
 unsigned long calc_chunk_crc(unsigned char *type, unsigned char *data, int data_len);
@@ -24,8 +21,10 @@ typedef struct Yuv420pBufferObject
 	int dimen_y;
 	int num_of_pixels;
 	unsigned char *y;
+#if 0
 	unsigned char *u;
 	unsigned char *v;
+#endif
 } Yuv420pBuffer;
 
 typedef struct RgbBufferObject
@@ -53,16 +52,62 @@ typedef struct PngObjectType
 	size_t length;
 } PngObject;
 
-void converter(char *, char *);
+void converter(char *in, char *out, int w, int h);
 void print_help(); /* print messages */
 
 int main(int argc, char *argv[])
 {
-	if (argc != 3) {
-		print_help();
-	} else {
-		converter(argv[1], argv[2]);
+	char opt;
+	int width = 0, height = 0;
+	char *input_file_name = NULL, *output_file_name = NULL, *resolution = NULL;
+
+	while ((opt = getopt(argc, argv, "d:i:o:")) != -1) {
+		switch (opt) {
+			case 'd': /* resolution */
+				if (optarg && (strchr(optarg, '*') || strchr(optarg, 'x'))) {
+					resolution = strdup(optarg);
+					if (DBG) printf("Image resolution = %s\n", resolution);
+					width = atoi(strsep(&resolution, "x*"));
+					height = atoi(strsep(&resolution, "x*"));
+					free(resolution);
+				} else {
+					fprintf(stderr, "Please provide correct resolution\n");
+				}
+				break;
+			case 'i': /* input file name */
+				if (optarg) {
+					if (DBG) printf("Input file name: %s\n", optarg);
+					input_file_name = strdup(optarg);
+				} else {
+					fprintf(stderr, "Please provide input file path\n");
+				}
+				break;
+			case 'o': /* output file name */
+				if (optarg) {
+					if (DBG) printf("Output file name: %s\n", optarg);
+					output_file_name = strdup(optarg);
+				} else {
+					fprintf(stderr, "Please provide output file path\n");
+				}
+				break;
+			default:
+				break;
+		}
 	}
+
+	if (input_file_name == NULL || output_file_name == NULL || width == 0 || height == 0) {
+		if (input_file_name != NULL)
+			free(input_file_name);
+		if (output_file_name != NULL)
+			free(output_file_name);
+		if (resolution != NULL)
+			free(resolution);
+
+		print_help();
+	}
+
+
+	converter(input_file_name, output_file_name, width, height);
 
 	return 0;
 }
@@ -87,7 +132,7 @@ FileBuffer *read_raw(char *raw_path)
 		printf("Raw file has empty content\n");
 	}
 
-	if (DBG) printf("RAW file size is %ld\n", raw_file_size);
+	//if (DBG) printf("RAW file size is %ld\n", raw_file_size);
 
 	/* allocate memory space for raw */
 	fb->buffer = (unsigned char *)malloc(raw_file_size);
@@ -101,9 +146,9 @@ FileBuffer *read_raw(char *raw_path)
 	return fb;
 }
 
-Yuv420pBuffer *parse_raw(FileBuffer *raw_buffer)
+Yuv420pBuffer *parse_raw(FileBuffer *raw_buffer, int width, int height)
 {
-	int uv_index;
+	int uv_index, buffer_size;
 	unsigned char *uv_plane;
 	Yuv420pBuffer *yuv_obj = (Yuv420pBuffer *) malloc(sizeof(Yuv420pBuffer));
 	if (yuv_obj == NULL) {
@@ -112,15 +157,21 @@ Yuv420pBuffer *parse_raw(FileBuffer *raw_buffer)
 	}
 	/* TODO: find a method to detect resolution */
 	/* ignore image size detection, assume image size is 640x480 */
-	yuv_obj->dimen_x = 640;
-	yuv_obj->dimen_y = 480;
-
+	yuv_obj->dimen_x = width;
+	yuv_obj->dimen_y = height;
 	yuv_obj->num_of_pixels = yuv_obj->dimen_x * yuv_obj->dimen_y;
+	buffer_size = yuv_obj->num_of_pixels;
+
+	if (raw_buffer->size < yuv_obj->num_of_pixels) {
+		/* raw buffer should be greater than or equal to number of pixels */
+		fprintf(stderr, "Warning: raw file size is smaller than number of pixel\n");
+		buffer_size = raw_buffer->size;
+	}
 
 	/* Y plane has one byte per pixel */
 	yuv_obj->y = (unsigned char *) malloc(yuv_obj->num_of_pixels);
-	memcpy(yuv_obj->y, raw_buffer->buffer, yuv_obj->num_of_pixels);
-
+	memcpy(yuv_obj->y, raw_buffer->buffer, buffer_size);
+#if 0
 	/* 2x2 pixels share one CbCr byte */
 	yuv_obj->u = (unsigned char *) malloc(yuv_obj->num_of_pixels/4);
 	yuv_obj->v = (unsigned char *) malloc(yuv_obj->num_of_pixels/4);
@@ -130,7 +181,7 @@ Yuv420pBuffer *parse_raw(FileBuffer *raw_buffer)
 		yuv_obj->u[uv_index] = uv_plane[uv_index] & 0xf;
 		yuv_obj->v[uv_index] = uv_plane[uv_index] >> 4;
 	}
-
+#endif
 	/* free raw_buffer here */
 	free(raw_buffer->buffer);
 	free(raw_buffer);
@@ -163,8 +214,10 @@ RgbBuffer *transform_yuv_to_rgb(Yuv420pBuffer *yuv_obj)
 	/* G = Y - 0.344 * (U - 128) - 0.714 * (V - 128) */
 	/* B = Y + 1.722 * (U - 128) */
 	/* formula is found on StackOverflow */
+#if 0
 	u_prime = (int)(yuv_obj->u[0]) - 128;
 	v_prime = (int)(yuv_obj->v[0]) - 128;
+#endif
 	for (y = 0, uv_plane_y = 0; y < yuv_obj->dimen_y; y++) {
 		*write_ptr = 0; // filter type byte for each line
 		write_ptr++;
@@ -174,6 +227,7 @@ RgbBuffer *transform_yuv_to_rgb(Yuv420pBuffer *yuv_obj)
 				memcpy(write_ptr, &yuv_y, 1);
 				write_ptr++;
 			} else {
+#if 0
 				*(write_ptr + 0) = yuv_y + 1.402 * v_prime;
 				*(write_ptr + 1) = yuv_y - 0.344 * u_prime - 0.714 * v_prime;
 				*(write_ptr + 2) = y + 1.722 * u_prime;
@@ -185,8 +239,10 @@ RgbBuffer *transform_yuv_to_rgb(Yuv420pBuffer *yuv_obj)
 					u_prime = (int)(yuv_obj->u[((yuv_obj->dimen_x)/2) * uv_plane_y + uv_plane_x]) - 128;
 					v_prime = (int)(yuv_obj->v[((yuv_obj->dimen_x)/2) * uv_plane_y + uv_plane_x]) - 128;
 				}
+#endif
 			}
 		}
+#if 0
 		if (rgb_obj->is_grayscale != 1) {
 			if (y % 2) {
 				/* every move on uv plane updates u_prime and v_prime */
@@ -195,10 +251,13 @@ RgbBuffer *transform_yuv_to_rgb(Yuv420pBuffer *yuv_obj)
 				v_prime = (int)(yuv_obj->v[((yuv_obj->dimen_x)/2) * uv_plane_y + uv_plane_x]) - 128;
 			}
 		}
+#endif
 	}
 	free(yuv_obj->y);
+#if 0
 	free(yuv_obj->u);
 	free(yuv_obj->v);
+#endif
 	free(yuv_obj);
 
 	return rgb_obj;
@@ -267,9 +326,6 @@ void build_png_header(PngObject *png, RgbBuffer *rgb_buffer)
 
 	reversed_bytes = __bswap_32(chunk_crc);
 	memcpy(ihdr->crc, &reversed_bytes, sizeof(ihdr->crc));
-
-	png->length += CHUNK_SIZE_WO_DATA; /* exclude 2 pointers in struct */
-	png->length += sizeof(ihdr_chunk_data); /* include size of data */;
 }
 
 void build_png_data(PngObject *png, RgbBuffer *rgb_buffer)
@@ -293,11 +349,9 @@ void build_png_data(PngObject *png, RgbBuffer *rgb_buffer)
 	if (c_result != Z_OK) {
 		printf("Failed to compress image data!!\n");
 		return;
-	} else if (rgb_buf_len != 0) {
-		printf("not being comsumed rgb buffer size: %ld\n", rgb_buf_len);
-	} else if (DBG) {
+	}/* else if (DBG) {
 		printf("allocated compress buffer size: %ld\n", compress_buf_len);
-	}
+	}*/
 
 	/* update chunk list */
 	idat = (Chunk *) malloc(sizeof(Chunk));
@@ -312,9 +366,6 @@ void build_png_data(PngObject *png, RgbBuffer *rgb_buffer)
 	crc = calc_chunk_crc(idat->type, idat->data, compress_buf_len);
 	reversed_bytes = __bswap_32(crc);
 	memcpy(idat->crc, &reversed_bytes, sizeof(idat->crc));
-
-	png->length += CHUNK_SIZE_WO_DATA; /* exclude 2 pointers in struct */
-	png->length += compress_buf_len; /* include size of idat data */;
 }
 
 void build_png_end(PngObject *png)
@@ -332,8 +383,6 @@ void build_png_end(PngObject *png)
 	memcpy(iend->type, iend_type, sizeof(iend->type));
 	memcpy(iend->crc, iend_crc, sizeof(iend->crc));
 	iend->data = NULL;
-
-	png->length += CHUNK_SIZE_WO_DATA; /* exclude pointer to data */
 }
 
 PngObject *build_png_chunks(RgbBuffer *rgb_buffer)
@@ -373,7 +422,7 @@ void write_png_to_file(char *png_path, PngObject *png)
 		fwrite(chunk_holder->type, 1, sizeof(chunk_holder->type), output_fd);
 		data_len = *(unsigned int *)chunk_holder->length;
 		data_len = __bswap_32(data_len);
-		if (DBG) printf("chunk data length = %d\n", data_len);
+		//if (DBG) printf("chunk data length = %d\n", data_len);
 		if (data_len != 0) {
 			fwrite(chunk_holder->data, 1, data_len, output_fd);
 			free(chunk_holder->data);
@@ -387,7 +436,7 @@ void write_png_to_file(char *png_path, PngObject *png)
 	/* free memory space allocated in build_png */
 }
 
-void converter(char *in_raw_path, char *out_png_path)
+void converter(char *in_raw_path, char *out_png_path, int width, int height)
 {
 	FileBuffer *raw_buffer;
 	Yuv420pBuffer *yuv_obj;
@@ -396,17 +445,21 @@ void converter(char *in_raw_path, char *out_png_path)
 
 	/* load raw into memory */
 	raw_buffer = read_raw(in_raw_path);
-
-	yuv_obj = parse_raw(raw_buffer);
-
+	/* parse binary data into yuv nv12 format */
+	yuv_obj = parse_raw(raw_buffer, width, height);
+	/* transform yuv format into rgb format */
 	rgb_obj = transform_yuv_to_rgb(yuv_obj);
-
+	/* build png chunks with rgb data */
 	png = build_png_chunks(rgb_obj);
-
+	/* write png chunks into file */
 	write_png_to_file(out_png_path, png);
+
+	free(in_raw_path);
+	free(out_png_path);
 }
 
 void print_help()
 {
-	printf("Usage: raw2png [raw file] [png file]\n");
+	fprintf(stderr, "Usage: raw2png -i [raw file] -d [width]x[height] -o [png file]\n");
+	exit(EXIT_FAILURE);
 }
